@@ -1,18 +1,35 @@
 import os
-import nba_stats
-import pandas as pd
+import json
 import requests
+import pandas as pd
 import streamlit as st
+import nba_stats
 
+# Konfiguracja Streamlit
 st.set_page_config(
     page_title="NBA AI Betting & Predictor", page_icon="🏀", layout="wide"
 )
 
 st.title("🏀 NBA AI Predictor & Value Betting System")
 st.markdown(
-    "*Zaawansowany system predykcji wyników, handicapów i szukania value"
-    " betów.*"
+    "*W pełni zautomatyzowany system predykcji, kalibracji i value bettingu w NBA.*"
 )
+
+# Wczytywanie zkalibrowanych wag z pliku model_weights.json (jeśli istnieje)
+WEIGHTS_FILE = "model_weights.json"
+
+
+def load_active_weights():
+  if os.path.exists(WEIGHTS_FILE):
+    try:
+      with open(WEIGHTS_FILE, "r") as f:
+        return json.load(f)
+    except Exception:
+      pass
+  return {"off_rtg": 0.38, "def_rtg": 0.38, "pace": 0.12, "ts_pct": 0.12}
+
+
+active_weights = load_active_weights()
 
 # Pobieranie klucza API
 API_KEY = None
@@ -30,7 +47,7 @@ REGIONS = "us"
 MARKETS = "h2h,spreads,totals"
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def fetch_odds():
   url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds"
   params = {
@@ -45,126 +62,150 @@ def fetch_odds():
   return response.json()
 
 
-@st.cache_data(ttl=21600)  # Cache statystyk NBA na 6 godzin
-def fetch_nba_analytics():
+@st.cache_data(ttl=10800)
+def fetch_nba_analytics(weights):
   df = nba_stats.get_team_advanced_stats(season="2025-26")
   if not df.empty:
-    return nba_stats.calculate_power_rating(df)
+    return nba_stats.calculate_power_rating(df, weights=weights)
   return pd.DataFrame()
 
 
+# Nawigacja
 st.sidebar.header("🎛️ Panel Sterowania")
 page = st.sidebar.selectbox(
     "Wybierz zakładkę",
     [
-        "Dzisiejsze Mecze i Kursy",
-        "Analizator Matchupów i Predyktor",
-        "Baza Statystyk i Power Index",
-        "Statystyki i ROI (Backtesting)",
+        "🔥 Dzisiejsze Value Bety i Kursy",
+        "⚡ Analizator Matchupów & Predyktor",
+        "🏆 Power Index & Baza Statystyk",
+        "⚙️ Stan Samouczenia (Wagi Modelu)",
+        "📈 Dashboard Skuteczności (ROI)",
     ],
 )
 
-# Pobieramy dane w tle
-df_power = fetch_nba_analytics()
+df_power = fetch_nba_analytics(active_weights)
 
-if page == "Dzisiejsze Mecze i Kursy":
-  st.header("📅 Nadchodzące spotkania i kursy rynkowe")
-  with st.spinner("Pobieranie najświeższych kursów..."):
-    data = fetch_odds()
+if page == "🔥 Dzisiejsze Value Bety i Kursy":
+  st.header("🎯 Wykryte Value Bety na Dziś")
 
-  if data is None or len(data) == 0:
-    st.info("Brak dostępnych meczów lub błąd API.")
+  bankroll = st.sidebar.number_input(
+      "Twój Kapitał (Bankroll PLN):", value=1000, step=100
+  )
+
+  with st.spinner("Analizowanie meczów i wyliczanie EV..."):
+    odds_data = fetch_odds()
+
+  if not odds_data:
+    st.info("Brak dostępnych kursów bukmacherskich na ten moment.")
   else:
-    for game in data:
+    found_value = False
+    for game in odds_data:
       home_team = game["home_team"]
       away_team = game["away_team"]
-      commence_time = game["commence_time"]
 
-      with st.expander(f"🏟️ {away_team} @ {home_team} | Start: {commence_time}"):
+      if not df_power.empty and home_team in df_power["TEAM_NAME"].values and away_team in df_power["TEAM_NAME"].values:
+        home_row = df_power[df_power["TEAM_NAME"] == home_team].iloc[0]
+        away_row = df_power[df_power["TEAM_NAME"] == away_team].iloc[0]
+
+        # Model Probability (Moneyline) oparty na Power Index
+        prob_home = home_row["POWER_INDEX"] / (
+            home_row["POWER_INDEX"] + away_row["POWER_INDEX"]
+        )
+        prob_away = 1.0 - prob_home
+
         bookmakers = game.get("bookmakers", [])
         if bookmakers:
           bm = bookmakers[0]
-          st.markdown(f"**Bukmacher główny:** `{bm['title']}`")
           for market in bm.get("markets", []):
-            st.markdown(f"* **Rynek:** `{market['key']}`")
-            for outcome in market.get("outcomes", []):
-              point_info = (
-                  f" (Linia: {outcome.get('point')})"
-                  if "point" in outcome
-                  else ""
-              )
-              st.write(
-                  f"  - {outcome['name']}: **{outcome.get('price')}**"
-                  f" {point_info}"
-              )
+            if market["key"] == "h2h":
+              for outcome in market.get("outcomes", []):
+                team_name = outcome["name"]
+                price = outcome["price"]
 
-elif page == "Analizator Matchupów i Predyktor":
-  st.header("⚡ Kalkulator Symulacji Meczu & Prediction Engine")
+                model_p = prob_home if team_name == home_team else prob_away
+                val_info = nba_stats.calculate_value_bet(
+                    model_p, price, bankroll=bankroll
+                )
 
-  if df_power.empty:
-    st.error("Brak danych statystycznych z NBA API.")
-  else:
+                if val_info["is_value"]:
+                  found_value = True
+                  st.success(
+                      f"🔥 **VALUE BET:** {team_name} (vs"
+                      f" {away_team if team_name==home_team else home_team})"
+                  )
+                  v_col1, v_col2, v_col3, v_col4 = st.columns(4)
+                  v_col1.metric("Kurs Bukmachera", f"{price}")
+                  v_col2.metric("Prawdopodobieństwo Modelu", f"{val_info['model_prob']}%")
+                  v_col3.metric("Expected Value (EV)", f"+{val_info['ev_percent']}%")
+                  v_col4.metric(
+                      "Sugerowana Stawka (Kelly)",
+                      f"{val_info['recommended_stake']} PLN",
+                  )
+                  st.markdown("---")
+
+    if not found_value:
+      st.info(
+          "Model przeanalizował dzisiejsze mecze i nie wykrył czystych Value"
+          " Betów (EV > +2%). Zalecana powściągliwość."
+      )
+
+elif page == "⚡ Analizator Matchupów & Predyktor":
+  st.header("⚡ Symulacja Meczu & Wpływ Zmęczenia")
+
+  if not df_power.empty:
     teams_list = sorted(df_power["TEAM_NAME"].unique().tolist())
-
-    col1, col2 = st.columns(2)
-    with col1:
-      home_team = st.selectbox(
-          "Gospodarz (Home Team):", teams_list, index=0
+    c1, c2 = st.columns(2)
+    with c1:
+      home_t = st.selectbox("Gospodarz:", teams_list, index=0)
+      home_b2b = st.checkbox("Gospodarz gra Back-to-Back (B2B)?")
+    with c2:
+      away_t = st.selectbox(
+          "Gość:", [t for t in teams_list if t != home_t], index=0
       )
-    with col2:
-      away_list = [t for t in teams_list if t != home_team]
-      away_team = st.selectbox(
-          "Gość (Away Team):", away_list, index=0
-      )
+      away_b2b = st.checkbox("Gość gra Back-to-Back (B2B)?")
 
-    # Parametry symulacji
-    home_advantage = st.slider("Atut własnego parkietu (pkt)", 0.0, 5.0, 2.5, 0.5)
+    if st.button("🚀 Symuluj Spotkanie"):
+      h_row = df_power[df_power["TEAM_NAME"] == home_t].iloc[0]
+      a_row = df_power[df_power["TEAM_NAME"] == away_t].iloc[0]
 
-    if st.button("🚀 Przeprowadź Analizę i Predykcję"):
-      home_row = df_power[df_power["TEAM_NAME"] == home_team].iloc[0]
-      away_row = df_power[df_power["TEAM_NAME"] == away_team].iloc[0]
+      pace = (h_row["PACE"] + a_row["PACE"]) / 2
 
-      # Wyznaczenie oczekiwanego tempa (Pace)
-      expected_pace = (home_row["PACE"] + away_row["PACE"]) / 2
+      # Zmęczenie daje -3.5 pkt dla drużyny grającej dzień po dniu
+      h_fatigue = -3.5 if home_b2b else 0.0
+      a_fatigue = -3.5 if away_b2b else 0.0
 
-      # Szacowanie zdobytych punktów na bazie Off/Def Ratings na 100 posiadan
-      # Oczekiwany Offense Gospodarzy vs Defense Gości
-      exp_home_score = (
+      exp_h = (
           (
               (
-                  home_row["OFF_RATING"]
-                  + away_row["DEF_RATING"]
+                  h_row["OFF_RATING"]
+                  + a_row["DEF_RATING"]
                   - df_power["OFF_RATING"].mean()
               )
               / 100
           )
-          * expected_pace
-      ) + home_advantage
-      exp_away_score = (
+          * pace
+      ) + 2.5 + h_fatigue
+      exp_a = (
           (
-              away_row["OFF_RATING"]
-              + home_row["DEF_RATING"]
-              - df_power["OFF_RATING"].mean()
+              (
+                  a_row["OFF_RATING"]
+                  + h_row["DEF_RATING"]
+                  - df_power["OFF_RATING"].mean()
+              )
+              / 100
           )
-          / 100
-      ) * expected_pace
+          * pace
+      ) + a_fatigue
 
-      predicted_spread = round(exp_home_score - exp_away_score, 1)
-      predicted_total = round(exp_home_score + exp_away_score, 1)
+      spread = round(exp_h - exp_a, 1)
 
-      st.markdown("---")
-      st.subheader("📊 Wynik Symulacji Modelu:")
+      m1, m2, m3 = st.columns(3)
+      m1.metric("Prognoza Wyniku", f"{round(exp_h, 1)} : {round(exp_a, 1)}")
+      m2.metric("Handicap Modelu", f"{home_t} {('-' if spread > 0 else '+')}{abs(spread)}")
+      m3.metric("Suma Punktów (Total)", f"{round(exp_h + exp_a, 1)} pkt")
 
-      res_col1, res_col2, res_col3 = st.columns(3)
-      res_col1.metric("Prognozowany Wynik", f"{round(exp_home_score, 1)} : {round(exp_away_score, 1)}")
-      res_col2.metric(
-          "Sugerowany Handicap (Spread)",
-          f"{home_team} {('-' if predicted_spread > 0 else '+')}{abs(predicted_spread)}",
-      )
-      res_col3.metric("Prognozowana Suma (Total)", f"{predicted_total} pkt")
-
-elif page == "Baza Statystyk i Power Index":
-  st.header("🏆 Ranking Drużyn (Power Index & Advanced Stats)")
+elif page == "🏆 Power Index & Baza Statystyk":
+  st.header("🏆 Aktualny Ranking Formy (Power Index)")
   if not df_power.empty:
     st.dataframe(
         df_power[[
@@ -172,19 +213,28 @@ elif page == "Baza Statystyk i Power Index":
             "POWER_INDEX",
             "OFF_RATING",
             "DEF_RATING",
-            "NET_RATING",
             "PACE",
             "TS_PCT",
         ]],
         use_container_width=True,
     )
-  else:
-    st.warning("Ładowanie statystyk z NBA API...")
 
-elif page == "Statystyki i ROI (Backtesting)":
-  st.header("📈 Skuteczność Systemu i ROI")
-  chart_data = pd.DataFrame(
-      {"Kolejka": ["Dzień 1", "Dzień 2", "Dzień 3", "Dzień 4"], "ROI (%)": [0.0, 4.2, 8.5, 12.4]}
+elif page == "⚙️ Stan Samouczenia (Wagi Modelu)":
+  st.header("⚙️ Aktualne Zkalibrowane Wagi Modelu")
+  st.markdown(
+      "Te wagi są automatycznie modyfikowane przez skrypt `trainer.py` po"
+      " każdej kolejce meczowej!"
   )
-  st.line_chart(chart_data, x="Kolejka", y="ROI (%)")
-    
+
+  st.json(active_weights)
+
+elif page == "📈 Dashboard Skuteczności (ROI)":
+  st.header("📈 Statystyki i Historia Wyników")
+  if os.path.exists("predictions_history.json"):
+    with open("predictions_history.json", "r") as f:
+      hist = json.load(f)
+    st.write(f"Łącznie zarejestrowanych predykcji w bazie: **{len(hist)}**")
+    st.dataframe(pd.DataFrame(hist))
+  else:
+    st.info("Baza danych predykcji jest budowana. Pierwsze rozliczenia pojawią się po nadchodzącej kolejce!")
+      
