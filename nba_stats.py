@@ -1,64 +1,27 @@
+import json
+import os
 import pandas as pd
-from nba_api.stats.endpoints import leaguedashteamstats
+
+DATA_FILE = "team_stats.json"
 
 
 def get_team_advanced_stats(season="2026-27", last_n_games=0):
-  """Pobiera zaawansowane statystyki zespołów bezpośrednio z oficjalnego NBA API
+  """Wczytuje wyłącznie prawdziwe, pobrane ze źródeł zewnętrznych dane.
 
-  z pełnym logowaniem błędów w celu diagnozy połączenia.
+  Zero sztucznych lub zmyślonych wartości.
   """
-  # Sprawdzamy kolejno sezon bieżący oraz poprzedni jako fallback
-  for target_season in [season, "2025-26"]:
+  if os.path.exists(DATA_FILE):
     try:
-      print(
-          f"Rozpoczęto pobieranie statystyk NBA dla sezonu: {target_season}..."
-      )
-
-      # Wywołanie endpointu zaawansowanych statystyk drużyn
-      stats = leaguedashteamstats.LeagueDashTeamStats(
-          measure_type_detailed_defense="Advanced",
-          season=target_season,
-          last_n_games=last_n_games,
-          timeout=30,
-      )
-
-      df = stats.get_data_frames()[0]
-
+      with open(DATA_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+      df = pd.DataFrame(data)
       if not df.empty:
-        cols_to_keep = [
-            "TEAM_ID",
-            "TEAM_NAME",
-            "GP",
-            "W",
-            "L",
-            "W_PCT",
-            "OFF_RATING",
-            "DEF_RATING",
-            "NET_RATING",
-            "PACE",
-            "AST_PCT",
-            "REB_PCT",
-            "TS_PCT",
-        ]
-        print(
-            f"Sukces! Pobrano {len(df)} wierszy danych z NBA API dla sezonu"
-            f" {target_season}"
-        )
-        return df[cols_to_keep].copy()
-      else:
-        print(
-            f"Ostrzeżenie: NBA API zwróciło pustą tabelę dla sezonu"
-            f" {target_season}."
-        )
-
+        return df
     except Exception as e:
-      print(
-          f"BŁÓD krytyczny podczas zapytania do NBA API (sezon"
-          f" {target_season}): {e}"
-      )
+      print(f"Błąd odczytu pliku z danymi: {e}")
 
   print(
-      "Nie udało się pobrać danych z żadnego sezonu. Sprawdź logi serwera."
+      "OSTRZEŻENIE: Brak pliku team_stats.json z prawdziwymi statystykami."
   )
   return pd.DataFrame()
 
@@ -104,7 +67,7 @@ def calculate_power_rating(df_stats, weights=None):
 
 def calculate_value_bet(
     model_prob, decimal_odds, bankroll=1000, kelly_fraction=0.25
-  ):
+):
   implied_prob = 1.0 / decimal_odds
   ev = (model_prob * decimal_odds) - 1.0
 
@@ -123,4 +86,4 @@ def calculate_value_bet(
       "model_prob": round(model_prob * 100, 1),
       "recommended_stake": max(0, recommended_stake),
   }
-    
+  
