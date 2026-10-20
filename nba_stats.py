@@ -1,41 +1,67 @@
 import pandas as pd
-from nba_api.stats.endpoints import leaguedashteamstats, teamgamelog
+from nba_api.stats.endpoints import leaguedashteamstats
 
 
-def get_team_advanced_stats(season="2025-26", last_n_games=0):
-  """Pobiera zaawansowane statystyki zespołów (OffRtg, DefRtg, Pace, NetRtg)."""
-  try:
-    print(f"Pobieranie statystyk NBA za sezon {season}...")
-    stats = leaguedashteamstats.LeagueDashTeamStats(
-        measure_type_detailed_defense="Advanced",
-        season=season,
-        last_n_games=last_n_games,
-        timeout=30,
-    )
+def get_team_advanced_stats(season="2026-27", last_n_games=0):
+  """Pobiera zaawansowane statystyki zespołów z uwzględnieniem hybrydowego punktu startowego na początek nowego sezonu."""
+  for target_season in [season, "2025-26"]:
+    try:
+      print(f"Pobieranie statystyk NBA za sezon {target_season}...")
+      stats = leaguedashteamstats.LeagueDashTeamStats(
+          measure_type_detailed_defense="Advanced",
+          season=target_season,
+          last_n_games=last_n_games,
+          timeout=30,
+      )
+      df = stats.get_data_frames()[0]
+      if not df.empty:
+        cols_to_keep = [
+            "TEAM_ID",
+            "TEAM_NAME",
+            "GP",
+            "W",
+            "L",
+            "W_PCT",
+            "OFF_RATING",
+            "DEF_RATING",
+            "NET_RATING",
+            "PACE",
+            "AST_PCT",
+            "REB_PCT",
+            "TS_PCT",
+        ]
+        df_filtered = df[cols_to_keep].copy()
 
-    df = stats.get_data_frames()[0]
+        # HYBRYDOWY KOMPROMIS NA START SEZONU:
+        # Jeśli pobieramy dane z poprzedniego sezonu (bo nowy dopiero ruszył),
+        # wygładzamy wskaźniki (Regresja do średniej ligowej o 15%),
+        # aby uwzględnić letnie roszady składowe i zmniejszyć błąd początkowy.
+        if target_season == "2025-26":
+          print(
+              "Zastosowano hybrydowe wygładzanie (Early-Season Smoothing) dla"
+              " danych z poprzedniego sezonu."
+          )
+          league_avg_off = df_filtered["OFF_RATING"].mean()
+          league_avg_def = df_filtered["DEF_RATING"].mean()
+          league_avg_pace = df_filtered["PACE"].mean()
 
-    cols_to_keep = [
-        "TEAM_ID",
-        "TEAM_NAME",
-        "GP",
-        "W",
-        "L",
-        "W_PCT",
-        "OFF_RATING",
-        "DEF_RATING",
-        "NET_RATING",
-        "PACE",
-        "AST_PCT",
-        "REB_PCT",
-        "TS_PCT",
-    ]
+          df_filtered["OFF_RATING"] = (
+              df_filtered["OFF_RATING"] * 0.85 + league_avg_off * 0.15
+          )
+          df_filtered["DEF_RATING"] = (
+              df_filtered["DEF_RATING"] * 0.85 + league_avg_def * 0.15
+          )
+          df_filtered["PACE"] = (
+              df_filtered["PACE"] * 0.85 + league_avg_pace * 0.15
+          )
 
-    return df[cols_to_keep].copy()
+        return df_filtered
+    except Exception as e:
+      print(
+          f"Próba pobrania dla sezonu {target_season} nie powiodła się: {e}"
+      )
 
-  except Exception as e:
-    print(f"Błąd podczas pobierania statystyk z NBA API: {e}")
-    return pd.DataFrame()
+  return pd.DataFrame()
 
 
 def calculate_power_rating(df_stats, weights=None):
@@ -77,30 +103,22 @@ def calculate_power_rating(df_stats, weights=None):
   return df.sort_values(by="POWER_INDEX", ascending=False)
 
 
-def calculate_value_bet(model_prob, decimal_odds, bankroll=1000, kelly_fraction=0.25):
-  """Kalkulator Value Bettingu z kryterium Kelly'ego (ułamkowym).
-
-  :param model_prob: Prawdopodobieństwo wygranej wyliczone przez nasz model
-  (0.0 - 1.0)
-  :param decimal_odds: Kurs dziesiętny bukmachera (np. 2.10)
-  :return: dict z Expected Value (EV) oraz rekomendowaną stawką
-  """
+def calculate_value_bet(
+    model_prob, decimal_odds, bankroll=1000, kelly_fraction=0.25
+):
   implied_prob = 1.0 / decimal_odds
-  ev = (model_prob * decimal_odds) - 1.0  # Value % (np. +0.05 = +5% EV)
+  ev = (model_prob * decimal_odds) - 1.0
 
   recommended_stake = 0
   if ev > 0:
-    # Wzór Kelly'ego: f* = (b*p - q) / b
     b = decimal_odds - 1.0
     p = model_prob
     q = 1.0 - p
     f_kelly = (b * p - q) / b
-
-    # Bezpieczne ułamkowe Kelly (np. 1/4 Kelly)
     recommended_stake = round(bankroll * f_kelly * kelly_fraction, 2)
 
   return {
-      "is_value": ev > 0.02,  # Warto grać jeśli EV > +2%
+      "is_value": ev > 0.02,
       "ev_percent": round(ev * 100, 2),
       "implied_prob": round(implied_prob * 100, 1),
       "model_prob": round(model_prob * 100, 1),
