@@ -3,17 +3,27 @@ from nba_api.stats.endpoints import leaguedashteamstats
 
 
 def get_team_advanced_stats(season="2026-27", last_n_games=0):
-  """Pobiera zaawansowane statystyki zespołów z uwzględnieniem hybrydowego punktu startowego na początek nowego sezonu."""
+  """Pobiera zaawansowane statystyki zespołów bezpośrednio z oficjalnego NBA API
+
+  z pełnym logowaniem błędów w celu diagnozy połączenia.
+  """
+  # Sprawdzamy kolejno sezon bieżący oraz poprzedni jako fallback
   for target_season in [season, "2025-26"]:
     try:
-      print(f"Pobieranie statystyk NBA za sezon {target_season}...")
+      print(
+          f"Rozpoczęto pobieranie statystyk NBA dla sezonu: {target_season}..."
+      )
+
+      # Wywołanie endpointu zaawansowanych statystyk drużyn
       stats = leaguedashteamstats.LeagueDashTeamStats(
           measure_type_detailed_defense="Advanced",
           season=target_season,
           last_n_games=last_n_games,
           timeout=30,
       )
+
       df = stats.get_data_frames()[0]
+
       if not df.empty:
         cols_to_keep = [
             "TEAM_ID",
@@ -30,37 +40,26 @@ def get_team_advanced_stats(season="2026-27", last_n_games=0):
             "REB_PCT",
             "TS_PCT",
         ]
-        df_filtered = df[cols_to_keep].copy()
+        print(
+            f"Sukces! Pobrano {len(df)} wierszy danych z NBA API dla sezonu"
+            f" {target_season}"
+        )
+        return df[cols_to_keep].copy()
+      else:
+        print(
+            f"Ostrzeżenie: NBA API zwróciło pustą tabelę dla sezonu"
+            f" {target_season}."
+        )
 
-        # HYBRYDOWY KOMPROMIS NA START SEZONU:
-        # Jeśli pobieramy dane z poprzedniego sezonu (bo nowy dopiero ruszył),
-        # wygładzamy wskaźniki (Regresja do średniej ligowej o 15%),
-        # aby uwzględnić letnie roszady składowe i zmniejszyć błąd początkowy.
-        if target_season == "2025-26":
-          print(
-              "Zastosowano hybrydowe wygładzanie (Early-Season Smoothing) dla"
-              " danych z poprzedniego sezonu."
-          )
-          league_avg_off = df_filtered["OFF_RATING"].mean()
-          league_avg_def = df_filtered["DEF_RATING"].mean()
-          league_avg_pace = df_filtered["PACE"].mean()
-
-          df_filtered["OFF_RATING"] = (
-              df_filtered["OFF_RATING"] * 0.85 + league_avg_off * 0.15
-          )
-          df_filtered["DEF_RATING"] = (
-              df_filtered["DEF_RATING"] * 0.85 + league_avg_def * 0.15
-          )
-          df_filtered["PACE"] = (
-              df_filtered["PACE"] * 0.85 + league_avg_pace * 0.15
-          )
-
-        return df_filtered
     except Exception as e:
       print(
-          f"Próba pobrania dla sezonu {target_season} nie powiodła się: {e}"
+          f"BŁÓD krytyczny podczas zapytania do NBA API (sezon"
+          f" {target_season}): {e}"
       )
 
+  print(
+      "Nie udało się pobrać danych z żadnego sezonu. Sprawdź logi serwera."
+  )
   return pd.DataFrame()
 
 
@@ -105,7 +104,7 @@ def calculate_power_rating(df_stats, weights=None):
 
 def calculate_value_bet(
     model_prob, decimal_odds, bankroll=1000, kelly_fraction=0.25
-):
+  ):
   implied_prob = 1.0 / decimal_odds
   ev = (model_prob * decimal_odds) - 1.0
 
@@ -124,4 +123,4 @@ def calculate_value_bet(
       "model_prob": round(model_prob * 100, 1),
       "recommended_stake": max(0, recommended_stake),
   }
-  
+    
